@@ -1,0 +1,20 @@
+# Go build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+vendor/
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+.claude/
+
+# Local dev tools (platform-specific binaries, not source)
+dev-tools/
