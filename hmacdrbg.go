@@ -41,14 +41,14 @@ import (
 // generate calls), the limit is unreachable in practice but the check
 // is required for normative SP 800-90A conformance.
 type hmacDRBG struct {
-	newHash         func() hash.Hash
-	K, V            []byte
-	qbytes          int
-	nBE             []byte // N as a big-endian byte slice of length qbytes
-	primed          bool   // true once next()/generate() has emitted at least one value
-	reseedCounter   uint64
-	reseedInterval  uint64
-	allowNext       bool // false for the RNG-wrapper instance; guards against misuse via next()
+	newHash        func() hash.Hash
+	K, V           []byte
+	qbytes         int
+	nBE            []byte // N as a big-endian byte slice of length qbytes
+	primed         bool   // true once next()/generate() has emitted at least one value
+	reseedCounter  uint64
+	reseedInterval uint64
+	allowNext      bool // false for the RNG-wrapper instance; guards against misuse via next()
 }
 
 // reseedIntervalDefault is the SP 800-90A Rev. 1 Tab. 2 ceiling on
