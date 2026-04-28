@@ -781,7 +781,11 @@ func genNonces(t *testing.T, c *Curve, x *big.Int, hashMsg []byte, count int) []
 	}
 	out := make([][]byte, count)
 	for i := range out {
-		out[i] = gen.next()
+		k, err := gen.next()
+		if err != nil {
+			t.Fatalf("gen.next: %v", err)
+		}
+		out[i] = k
 	}
 	return out
 }

@@ -38,9 +38,14 @@ func TestHMACDRBG_CAVS(t *testing.T) {
 
 			g := newPlainHMACDRBG(tc.newHash, entropy, nonce, pers, 1, nil)
 			// First generate — output discarded per CAVS protocol.
-			_ = g.generate(len(want))
+			if _, err := g.generate(len(want)); err != nil {
+				t.Fatalf("generate #1: %v", err)
+			}
 			// Second generate — compared to ReturnedBits.
-			got := g.generate(len(want))
+			got, err := g.generate(len(want))
+			if err != nil {
+				t.Fatalf("generate #2: %v", err)
+			}
 			if !bytesEqual(got, want) {
 				t.Errorf("CAVS vector mismatch\n  got:  %x\n  want: %x", got, want)
 			}
@@ -60,8 +65,13 @@ func TestHMACDRBG_CAVSRejectsTampered(t *testing.T) {
 	want := mustHex(t, tc.returnedBitsHex)
 
 	g := newPlainHMACDRBG(tc.newHash, entropy, nonce, pers, 1, nil)
-	_ = g.generate(len(want))
-	got := g.generate(len(want))
+	if _, err := g.generate(len(want)); err != nil {
+		t.Fatalf("generate #1: %v", err)
+	}
+	got, err := g.generate(len(want))
+	if err != nil {
+		t.Fatalf("generate #2: %v", err)
+	}
 	// Flip the first byte of `want` and expect inequality.
 	want[0] ^= 0x01
 	if bytesEqual(got, want) {

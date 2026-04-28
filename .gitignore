@@ -18,3 +18,6 @@ go.work.sum
 
 # Local dev tools (platform-specific binaries, not source)
 dev-tools/
+
+# Audit-Referenzdokumente (lokal, nicht versioniert)
+specs/

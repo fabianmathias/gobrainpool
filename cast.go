@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 )
 
 // Cryptographic Algorithm Self-Test (CAST) / pre-operational self-tests.
@@ -29,13 +30,47 @@ import (
 // NewPrivateKey, NewPublicKey, ECDH. A call that reaches the
 // service-indicator recording has by construction passed the CAST.
 
+// selfTestPassed records whether the most recent CAST run succeeded.
+// Set to true on the initial successful sync.OnceFunc run; flipped by
+// RunSelfTests on subsequent invocations.
+var selfTestPassed atomic.Bool
+
 var selfTestOnce = sync.OnceFunc(func() {
 	if err := selfTest(); err != nil {
 		panic("gobrainpool: CAST failure: " + err.Error())
 	}
+	selfTestPassed.Store(true)
 })
 
-func ensureSelfTestsPassed() { selfTestOnce() }
+// ensureSelfTestsPassed runs the pre-operational CAST exactly once per
+// process and panics on failure. Subsequent calls are zero-cost reads
+// of the cached result. If a later RunSelfTests call has flipped the
+// flag back to false (re-test failed), service entries panic so that no
+// crypto is performed under a known-bad self-test result.
+func ensureSelfTestsPassed() {
+	selfTestOnce()
+	if !selfTestPassed.Load() {
+		panic("gobrainpool: CAST in failed state")
+	}
+}
+
+// RunSelfTests re-runs the full CAST suite on demand and reports the
+// first failure encountered. On success the package's "self-tests
+// passed" flag is set; on failure it is cleared and any subsequent
+// service call panics until a successful re-run flips the flag back.
+//
+// Required by FIPS 140-3 IG 10.3.A and AIS 20/31, which mandate that
+// self-tests be re-runnable on operator demand. Safe to call
+// concurrently with other crypto operations; on-going operations
+// complete under whatever state was in effect at their entry.
+func RunSelfTests() error {
+	if err := selfTest(); err != nil {
+		selfTestPassed.Store(false)
+		return err
+	}
+	selfTestPassed.Store(true)
+	return nil
+}
 
 // selfTest runs the full set of KATs and returns the first failure
 // encountered, nil on success. Exported inside the package so tests
@@ -174,31 +209,42 @@ var lookupECDSAVector = func(c *Curve) ecdsaCASTVector {
 	panic("gobrainpool: unknown curve in CAST")
 }
 
+// ECDH CAST vectors are taken verbatim from RFC 7027 §2 (the
+// authoritative test-vector source for Brainpool curves), so the
+// pre-operational self-test exercises the ECDH primitive against an
+// independent reference rather than internal-consistency-only.
+//
+//   - bp256r1: RFC 7027 §2.1
+//   - bp384r1: RFC 7027 §2.2
+//   - bp512r1: RFC 7027 §2.3
+//
+// privA / pubB / expectedZ are the inputs and expected output of one
+// half of the RFC's symmetric exchange (dA · QB → xZ).
 var lookupECDHVector = func(c *Curve) ecdhCASTVector {
 	switch c {
 	case bp256r1:
 		return ecdhCASTVector{
 			curve:     c,
-			privA:     hexMust("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
-			privB:     hexMust("0102030405060708090a0b0c0d0e0f1011121314151617180102030405060708"),
-			pubB:      hexMust("04368a3f13e6992ece751e520a1e76e30f3f978886b11b6aff75e726f555f642297f28991770a4c90fa51e17939556d6db54371c8da92efdf5b5838abe549424ac"),
-			expectedZ: hexMust("13a024d7f0ff99906220052e0bb94e332a9b50a40fe1dcff6ab4e7769a6a629b"),
+			privA:     hexMust("81DB1EE100150FF2EA338D708271BE38300CB54241D79950F77B063039804F1D"),
+			privB:     hexMust("55E40BC41E37E3E2AD25C3C6654511FFA8474A91A0032087593852D3E7D76BD3"),
+			pubB:      hexMust("048D2D688C6CF93E1160AD04CC4429117DC2C41825E1E9FCA0ADDD34E6F1B39F7B990C57520812BE512641E47034832106BC7D3E8DD0E4C7F1136D7006547CEC6A"),
+			expectedZ: hexMust("89AFC39D41D3B327814B80940B042590F96556EC91E6AE7939BCE31F3A18BF2B"),
 		}
 	case bp384r1:
 		return ecdhCASTVector{
 			curve:     c,
-			privA:     hexMust("0102030405060708090a0b0c0d0e0f1011121314151617180102030405060708090a0b0c0d0e0f101112131415161718"),
-			privB:     hexMust("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f200102030405060708090a0b0c0d0e0f10"),
-			pubB:      hexMust("0451dd6c1534da680af53ab4fc9d2a728ca4a42c30708df7ed38114a9a010a1b56ecc4e9d246a95769651646411d65d2ab5029adab29fcf1300ed0be6eaf2a12192a3857afb1a4e46896dc1bcf742837626aec58b74c708ce9d4d86751961701a0"),
-			expectedZ: hexMust("5028e3c3f943cb7ad41116f300135407c4b55b80ddb2659a58af0123076dd937f76aed391bc09fce75a266ae7489dbee"),
+			privA:     hexMust("1E20F5E048A5886F1F157C74E91BDE2B98C8B52D58E5003D57053FC4B0BD65D6F15EB5D1EE1610DF870795143627D042"),
+			privB:     hexMust("032640BC6003C59260F7250C3DB58CE647F98E1260ACCE4ACDA3DD869F74E01F8BA5E0324309DB6A9831497ABAC96670"),
+			pubB:      hexMust("044D44326F269A597A5B58BBA565DA5556ED7FD9A8A9EB76C25F46DB69D19DC8CE6AD18E404B15738B2086DF37E71D1EB462D692136DE56CBE93BF5FA3188EF58BC8A3A0EC6C1E151A21038A42E9185329B5B275903D192F8D4E1F32FE9CC78C48"),
+			expectedZ: hexMust("0BD9D3A7EA0B3D519D09D8E48D0785FB744A6B355E6304BC51C229FBBCE239BBADF6403715C35D4FB2A5444F575D4F42"),
 		}
 	case bp512r1:
 		return ecdhCASTVector{
 			curve:     c,
-			privA:     hexMust("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
-			privB:     hexMust("0102030405060708090a0b0c0d0e0f1011121314151617180102030405060708090a0b0c0d0e0f1011121314151617180102030405060708090a0b0c0d0e0f10"),
-			pubB:      hexMust("044b2a9b75215f7ae026cfdc6d68d62fb0eef7c9cca5dcc13159e41b8bf1a0664bab7091676e5a7192cfd0873f5ae171eb684be6cb616fcec535945ed1196c3be4518765b5b65ff1fd163385ade25a3e493d0895618492c2be17eadc777460232b03b923faececbdd1d6a4484542f9e49c42956bbc35cb10fba779cdd3f5f84bf2"),
-			expectedZ: hexMust("3ba57d96d37db81f2e15b94a21242b7836f459335a604d14f25a043f76be42a9e7049a26d13bc1af25a0cb6255b250a8fdce9d7fc219783a7c41149900c7c9ef"),
+			privA:     hexMust("16302FF0DBBB5A8D733DAB7141C1B45ACBC8715939677F6A56850A38BD87BD59B09E80279609FF333EB9D4C061231FB26F92EEB04982A5F1D1764CAD57665422"),
+			privB:     hexMust("230E18E1BCC88A362FA54E4EA3902009292F7F8033624FD471B5D8ACE49D12CFABBC19963DAB8E2F1EBA00BFFB29E4D72D13F2224562F405CB80503666B25429"),
+			pubB:      hexMust("049D45F66DE5D67E2E6DB6E93A59CE0BB48106097FF78A081DE781CDB31FCE8CCBAAEA8DD4320C4119F1E9CD437A2EAB3731FA9668AB268D871DEDA55A5473199F2FDC313095BCDD5FB3A91636F07A959C8E86B5636A1E930E8396049CB481961D365CC11453A06C719835475B12CB52FC3C383BCE35E27EF194512B71876285FA"),
+			expectedZ: hexMust("A7927098655F1F9976FA50A9D566865DC530331846381C87256BAF3226244B76D36403C024D7BBF0AA0803EAFF405D3D24F11A9B5C0BEF679FE1454B21C4CD1F"),
 		}
 	}
 	panic("gobrainpool: unknown curve in CAST")
@@ -234,33 +280,47 @@ func pairwiseConsistencyCheck(priv *PrivateKey) error {
 	// non-trivial e value.
 	digest := bytes.Repeat([]byte{0xA5}, c.byteSize)
 
-	var rBytes, sBytes []byte
-	var err error
-	switch c {
-	case bp256r1:
-		rBytes, sBytes, err = sign256(priv, digest, nil)
-	case bp384r1:
-		rBytes, sBytes, err = sign384(priv, digest, nil)
-	case bp512r1:
-		rBytes, sBytes, err = sign512(priv, digest, nil)
-	default:
-		return errors.New("unknown curve")
-	}
-	if err != nil {
-		return fmt.Errorf("sign: %w", err)
-	}
+	// Two sign/verify roundtrips are exercised so that both signing
+	// service paths the package exposes are covered:
+	//
+	//   - hedge == nil → pure RFC 6979 deterministic path
+	//   - hedge != nil → hedged (draft-irtf-cfrg-det-sigs-with-noise)
+	//
+	// AIS 20/31 expects PCT to cover every service path that may be
+	// reached via the public API; FIPS 140-3 IG D.G permits one path
+	// but exercising both is strictly stronger. The fixed Z block keeps
+	// the test deterministic while still flowing through the hedged
+	// DRBG construction.
+	hedgeBlock := bytes.Repeat([]byte{0x5A}, c.byteSize)
+	for _, hedge := range [][]byte{nil, hedgeBlock} {
+		var rBytes, sBytes []byte
+		var err error
+		switch c {
+		case bp256r1:
+			rBytes, sBytes, err = sign256(priv, digest, hedge)
+		case bp384r1:
+			rBytes, sBytes, err = sign384(priv, digest, hedge)
+		case bp512r1:
+			rBytes, sBytes, err = sign512(priv, digest, hedge)
+		default:
+			return errors.New("unknown curve")
+		}
+		if err != nil {
+			return fmt.Errorf("sign: %w", err)
+		}
 
-	var ok bool
-	switch c {
-	case bp256r1:
-		ok = verify256(priv.publicKey, digest, rBytes, sBytes)
-	case bp384r1:
-		ok = verify384(priv.publicKey, digest, rBytes, sBytes)
-	case bp512r1:
-		ok = verify512(priv.publicKey, digest, rBytes, sBytes)
-	}
-	if !ok {
-		return errors.New("verify rejected freshly-signed digest")
+		var ok bool
+		switch c {
+		case bp256r1:
+			ok = verify256(priv.publicKey, digest, rBytes, sBytes)
+		case bp384r1:
+			ok = verify384(priv.publicKey, digest, rBytes, sBytes)
+		case bp512r1:
+			ok = verify512(priv.publicKey, digest, rBytes, sBytes)
+		}
+		if !ok {
+			return errors.New("verify rejected freshly-signed digest")
+		}
 	}
 	return nil
 }

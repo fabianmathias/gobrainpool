@@ -13,9 +13,10 @@
 // addition formula (Algorithm 1, "general a"), which is safe on every
 // curve point including the identity and self-addition.
 //
-// Scalar multiplication uses a fixed 4-bit signed window schedule with
-// a constant-time table lookup. The iteration count and memory access
-// pattern depend only on the curve, not on the secret scalar.
+// Scalar multiplication uses a fixed 4-bit unsigned window schedule
+// with a constant-time table lookup (table[0..15], no Booth recoding).
+// The iteration count and memory-access pattern depend only on the
+// curve, not on the secret scalar.
 //
 // ECDSA signatures are produced with RFC 6979 deterministic nonces. If
 // the caller supplies a non-nil rand, fresh CSPRNG bytes are folded into
@@ -65,8 +66,11 @@
 //   - ECDSA Sign arithmetic: k⁻¹, r·d, +e, ·k⁻¹ mod N
 //   - ECDH shared-secret extraction
 //
-// Verification is a public-value operation and is not hardened against
-// timing side channels.
+// ECDSA verification is implemented through the same constant-time
+// scalar-mult and NScalar arithmetic used by signing (Fermat-based
+// modular inverse, ctLookup table reads). Verify operates only on
+// public values, so this is not a hard security requirement, but the
+// implementation does not branch or memory-access on (r, s) or e.
 //
 // # Curve parameters
 //

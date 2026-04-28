@@ -119,10 +119,21 @@ func (c *Curve) NewPublicKey(key []byte) (*PublicKey, error) {
 
 // Sign implements crypto.Signer. It produces a hedged ASN.1-DER-encoded
 // ECDSA signature over digest — equivalent to calling SignASN1(rand, k,
-// digest). opts is currently ignored; the caller must have hashed the
-// message with a function whose output matches the curve size (SHA-256
-// for BP256r1, SHA-384 for BP384r1, SHA-512 for BP512r1).
-func (k *PrivateKey) Sign(rand io.Reader, digest []byte, _ crypto.SignerOpts) ([]byte, error) {
+// digest). The caller must have hashed the message with a function
+// whose output matches the curve size (SHA-256 for BP256r1, SHA-384 for
+// BP384r1, SHA-512 for BP512r1).
+//
+// Under approved-parameter enforcement (see SetEnforceApproved), if
+// opts is non-nil and opts.HashFunc() reports a hash whose output size
+// does not equal the curve byte size, Sign returns an error before any
+// entropy is read. With enforcement off, opts is informational only and
+// the digest length is the sole approval-relevant input.
+func (k *PrivateKey) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
+	if opts != nil && EnforceApproved() {
+		if h := opts.HashFunc(); h != 0 && h.Size() != k.curve.byteSize {
+			return nil, errors.New("gobrainpool: non-approved operation blocked by approved-parameter enforcement (opts.HashFunc output size must equal curve byte size)")
+		}
+	}
 	return SignASN1(rand, k, digest)
 }
 
@@ -184,11 +195,14 @@ func signASN1(priv *PrivateKey, digest []byte, rand io.Reader) ([]byte, error) {
 		// the same reason randScalarBytes does: the bytes that reach
 		// the crypto core come from an approved SP 800-90A DRBG seeded
 		// from the caller's Reader, not directly from the Reader.
-		drbg, err := newRNGDRBG(rand)
+		drbg, err := newRNGDRBG(rand, priv.curve)
 		if err != nil {
 			return nil, err
 		}
-		hedge = drbg.generate(priv.curve.byteSize)
+		hedge, err = drbg.generate(priv.curve.byteSize)
+		if err != nil {
+			return nil, err
+		}
 	}
 	var rBytes, sBytes []byte
 	var err error
@@ -325,6 +339,30 @@ func newPrivateKeyFromScalar(c *Curve, d []byte) (*PrivateKey, error) {
 	return priv, nil
 }
 
+// hashToIntBytes implements FIPS 186-5 §6.4.1/§6.4.2 bits2int on the
+// hash input: take the leftmost min(N, outlen) bits as a non-negative
+// integer and encode it as a fixed-width big-endian byte slice of
+// length c.byteSize. NO mod-N reduction is applied — that is the
+// distinction from bits2octets (hashToScalarBytes) per RFC 6979 §2.3.
+//
+// Used as the ECDSA "e" input to the signing/verification arithmetic.
+// Because the subsequent NScalar.SetBytes step reduces mod N the
+// arithmetic result is mathematically identical to passing
+// bits2octets, but keeping the helpers separate makes the spec mapping
+// explicit for review (FIPS 186-5: "e" = bits2int; RFC 6979: DRBG seed
+// = bits2octets).
+func hashToIntBytes(hash []byte, c *Curve) []byte {
+	if len(hash) > c.byteSize {
+		hash = hash[:c.byteSize]
+	}
+	if excess := len(hash)*8 - c.bitSize; excess > 0 {
+		hash = rightShift(hash, excess)
+	}
+	out := make([]byte, c.byteSize)
+	copy(out[c.byteSize-len(hash):], hash)
+	return out
+}
+
 // hashToScalarBytes implements RFC 6979 §2.3.4 bits2octets on the hash
 // input: take the leftmost ceil(log2 n) bits (bits2int), reduce mod n,
 // then encode as a fixed-width big-endian byte slice of length
@@ -412,12 +450,15 @@ func randScalarBytes(rand io.Reader, c *Curve) ([]byte, error) {
 	if rand == nil {
 		rand = crand.Reader
 	}
-	drbg, err := newRNGDRBG(rand)
+	drbg, err := newRNGDRBG(rand, c)
 	if err != nil {
 		return nil, err
 	}
 	for i := 0; i < 128; i++ {
-		buf := drbg.generate(c.byteSize)
+		buf, err := drbg.generate(c.byteSize)
+		if err != nil {
+			return nil, err
+		}
 		if nonceInRange(buf, c.nBE) {
 			out := make([]byte, c.byteSize)
 			copy(out, buf)
@@ -523,12 +564,12 @@ func newSignDRBG(c *Curve, xBytes, hashMsg, hedge []byte) (*hmacDRBG, error) {
 	if hedge == nil {
 		return newRFC6979Gen(c, xBytes, hashMsg)
 	}
-	return newHedgedGen(c, xBytes, hashMsg, hedge), nil
+	return newHedgedGen(c, xBytes, hashMsg, hedge)
 }
 
 func sign256(priv *PrivateKey, hash, hedge []byte) (rB, sB []byte, err error) {
 	c := bp256r1
-	eBytes := hashToScalarBytes(hash, c)
+	eBytes := hashToIntBytes(hash, c)
 
 	var d, e bpec.NScalar256
 	if _, err := d.SetBytes(priv.d); err != nil {
@@ -544,7 +585,10 @@ func sign256(priv *PrivateKey, hash, hedge []byte) (rB, sB []byte, err error) {
 	}
 
 	for attempt := 0; attempt < 128; attempt++ {
-		kBuf := gen.next()
+		kBuf, err := gen.next()
+		if err != nil {
+			return nil, nil, err
+		}
 
 		kG := new(bpec.BP256Point)
 		if _, err := kG.ScalarBaseMult(kBuf); err != nil {
@@ -584,7 +628,7 @@ func sign256(priv *PrivateKey, hash, hedge []byte) (rB, sB []byte, err error) {
 
 func sign384(priv *PrivateKey, hash, hedge []byte) (rB, sB []byte, err error) {
 	c := bp384r1
-	eBytes := hashToScalarBytes(hash, c)
+	eBytes := hashToIntBytes(hash, c)
 
 	var d, e bpec.NScalar384
 	if _, err := d.SetBytes(priv.d); err != nil {
@@ -600,7 +644,10 @@ func sign384(priv *PrivateKey, hash, hedge []byte) (rB, sB []byte, err error) {
 	}
 
 	for attempt := 0; attempt < 128; attempt++ {
-		kBuf := gen.next()
+		kBuf, err := gen.next()
+		if err != nil {
+			return nil, nil, err
+		}
 
 		kG := new(bpec.BP384Point)
 		if _, err := kG.ScalarBaseMult(kBuf); err != nil {
@@ -640,7 +687,7 @@ func sign384(priv *PrivateKey, hash, hedge []byte) (rB, sB []byte, err error) {
 
 func sign512(priv *PrivateKey, hash, hedge []byte) (rB, sB []byte, err error) {
 	c := bp512r1
-	eBytes := hashToScalarBytes(hash, c)
+	eBytes := hashToIntBytes(hash, c)
 
 	var d, e bpec.NScalar512
 	if _, err := d.SetBytes(priv.d); err != nil {
@@ -656,7 +703,10 @@ func sign512(priv *PrivateKey, hash, hedge []byte) (rB, sB []byte, err error) {
 	}
 
 	for attempt := 0; attempt < 128; attempt++ {
-		kBuf := gen.next()
+		kBuf, err := gen.next()
+		if err != nil {
+			return nil, nil, err
+		}
 
 		kG := new(bpec.BP512Point)
 		if _, err := kG.ScalarBaseMult(kBuf); err != nil {
@@ -696,7 +746,7 @@ func sign512(priv *PrivateKey, hash, hedge []byte) (rB, sB []byte, err error) {
 
 func verify256(pub *PublicKey, hash, rBytes, sBytes []byte) bool {
 	c := bp256r1
-	eBytes := hashToScalarBytes(hash, c)
+	eBytes := hashToIntBytes(hash, c)
 
 	var r, s, e, w, u1, u2 bpec.NScalar256
 	if _, err := r.SetBytes(rBytes); err != nil {
@@ -749,7 +799,7 @@ func verify256(pub *PublicKey, hash, rBytes, sBytes []byte) bool {
 
 func verify384(pub *PublicKey, hash, rBytes, sBytes []byte) bool {
 	c := bp384r1
-	eBytes := hashToScalarBytes(hash, c)
+	eBytes := hashToIntBytes(hash, c)
 
 	var r, s, e, w, u1, u2 bpec.NScalar384
 	if _, err := r.SetBytes(rBytes); err != nil {
@@ -798,7 +848,7 @@ func verify384(pub *PublicKey, hash, rBytes, sBytes []byte) bool {
 
 func verify512(pub *PublicKey, hash, rBytes, sBytes []byte) bool {
 	c := bp512r1
-	eBytes := hashToScalarBytes(hash, c)
+	eBytes := hashToIntBytes(hash, c)
 
 	var r, s, e, w, u1, u2 bpec.NScalar512
 	if _, err := r.SetBytes(rBytes); err != nil {
